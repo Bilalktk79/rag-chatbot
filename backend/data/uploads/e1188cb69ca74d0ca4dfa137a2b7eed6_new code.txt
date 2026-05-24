@@ -1,0 +1,154 @@
+import tensorflow as tf
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+from sklearn.metrics import classification_report, confusion_matrix
+import seaborn as sns
+
+# ================= PATHS =================
+TRAIN_DIR = r"E:\c\fyp_All_Data\FYP_new\dataset\dataset_split\train"
+VAL_DIR   = r"E:\c\fyp_All_Data\FYP_new\dataset\dataset_split\val"
+TEST_DIR  = r"E:\c\fyp_All_Data\FYP_new\dataset\dataset_split\test"
+
+IMG_SIZE = (64, 64)
+BATCH_SIZE = 16
+EPOCHS = 35
+
+# ================= LOAD DATA =================
+train_ds = tf.keras.preprocessing.image_dataset_from_directory(
+    TRAIN_DIR,
+    image_size=IMG_SIZE,
+    batch_size=BATCH_SIZE
+)
+
+val_ds = tf.keras.preprocessing.image_dataset_from_directory(
+    VAL_DIR,
+    image_size=IMG_SIZE,
+    batch_size=BATCH_SIZE
+)
+
+test_ds = tf.keras.preprocessing.image_dataset_from_directory(
+    TEST_DIR,
+    image_size=IMG_SIZE,
+    batch_size=BATCH_SIZE,
+    shuffle=False
+)
+
+class_names = train_ds.class_names
+
+# ================= PERFORMANCE =================
+AUTOTUNE = tf.data.AUTOTUNE
+
+# ================= STRONG AUGMENTATION =================
+data_augmentation = tf.keras.Sequential([
+    tf.keras.layers.Rescaling(1./255),
+    tf.keras.layers.RandomFlip("horizontal"),
+    tf.keras.layers.RandomRotation(0.2),
+    tf.keras.layers.RandomZoom(0.2),
+    tf.keras.layers.RandomContrast(0.2),
+])
+
+train_ds = train_ds.map(lambda x, y: (data_augmentation(x), y))
+train_ds = train_ds.prefetch(AUTOTUNE)
+val_ds = val_ds.map(lambda x, y: (x/255.0, y)).prefetch(AUTOTUNE)
+test_ds = test_ds.map(lambda x, y: (x/255.0, y)).prefetch(AUTOTUNE)
+
+# ================= LOAD MODEL =================
+model = tf.keras.models.load_model("updated_model.h5")
+
+# ================= COMPILE =================
+optimizer = tf.keras.optimizers.AdamW(
+    learning_rate=3e-4,
+    weight_decay=1e-4
+)
+
+loss = tf.keras.losses.SparseCategoricalCrossentropy(label_smoothing=0.1)
+
+model.compile(
+    optimizer=optimizer,
+    loss=loss,
+    metrics=["accuracy"]
+)
+
+# ================= CALLBACKS =================
+callbacks = [
+    tf.keras.callbacks.ModelCheckpoint(
+        "best_model.h5",
+        monitor="val_accuracy",
+        save_best_only=True,
+        verbose=1
+    ),
+    tf.keras.callbacks.EarlyStopping(
+        monitor="val_loss",
+        patience=6,
+        restore_best_weights=True
+    ),
+    tf.keras.callbacks.ReduceLROnPlateau(
+        monitor="val_loss",
+        factor=0.3,
+        patience=3,
+        verbose=1
+    )
+]
+
+# ================= TRAIN =================
+history = model.fit(
+    train_ds,
+    validation_data=val_ds,
+    epochs=EPOCHS,
+    callbacks=callbacks
+)
+
+# ================= SAVE FINAL =================
+model.save("final_model.h5")
+
+# ================= PLOT ACCURACY =================
+plt.figure()
+plt.plot(history.history['accuracy'], label='Train')
+plt.plot(history.history['val_accuracy'], label='Val')
+plt.legend()
+plt.title("Accuracy")
+plt.savefig("accuracy.png")
+plt.close()
+
+# ================= PLOT LOSS =================
+plt.figure()
+plt.plot(history.history['loss'], label='Train')
+plt.plot(history.history['val_loss'], label='Val')
+plt.legend()
+plt.title("Loss")
+plt.savefig("loss.png")
+plt.close()
+
+# ================= EVALUATION =================
+y_true = np.concatenate([y for x, y in test_ds], axis=0)
+y_pred = np.argmax(model.predict(test_ds), axis=1)
+
+# ================= CLASSIFICATION REPORT =================
+report = classification_report(y_true, y_pred, target_names=class_names)
+with open("classification_report.txt", "w") as f:
+    f.write(report)
+
+# ================= CONFUSION MATRIX =================
+cm = confusion_matrix(y_true, y_pred)
+
+plt.figure(figsize=(10,8))
+sns.heatmap(cm, annot=True, fmt="d",
+            xticklabels=class_names,
+            yticklabels=class_names)
+plt.title("Confusion Matrix")
+plt.savefig("confusion_matrix.png")
+plt.close()
+
+# ================= TFLITE CONVERSION =================
+converter = tf.lite.TFLiteConverter.from_keras_model(model)
+
+# 🔥 Important: avoid Flex ops
+converter.optimizations = [tf.lite.Optimize.DEFAULT]
+
+tflite_model = converter.convert()
+
+with open("model.tflite", "wb") as f:
+    f.write(tflite_model)
+
+print("✅ Training complete + all outputs saved")
